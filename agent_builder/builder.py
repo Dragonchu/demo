@@ -13,40 +13,40 @@ from .models import SystemPlan
 from .tools import ALL_TOOLS
 from .planner import get_llm
 
-# 1. Define the shared state
+# 1. 定义共享状态
 class AgentState(TypedDict):
-    # The annotation tells the graph that new messages are appended to the existing list
+    # 注解告诉图，新消息会被追加到现有列表中
     messages: Annotated[Sequence[BaseMessage], operator.add]
-    # We could add 'next' here to track who goes next
+    # 我们可以在这里添加 'next' 来跟踪下一个是谁
     next: str
 
-# 2. Helper to create a sub-agent node
+# 2. 创建子 Agent 节点的辅助函数
 def create_agent_node(agent_config, llm, tools):
     """
-    Creates a node for the graph that runs a specific agent.
-    We use create_react_agent for the standard tool-using loop within the node.
+    为图创建一个运行特定 Agent 的节点。
+    我们在节点内使用 create_react_agent 进行标准的工具使用循环。
     """
     
-    # Check for Mock LLM
+    # 检查是否为模拟 LLM
     if hasattr(llm, "_llm_type") and llm._llm_type == "mock-chat-model":
         def mock_agent_node(state):
-            # Return a mock response
-            return {"messages": [AIMessage(content=f"[{agent_config.name}] Mock work done.")]}
+            # 返回模拟响应
+            return {"messages": [AIMessage(content=f"[{agent_config.name}] 模拟工作完成。")]}
         return mock_agent_node
 
-    # The agent needs a system message. 
-    # create_react_agent takes 'state_modifier' or 'messages_modifier' to inject system prompt.
+    # Agent 需要一个系统消息。
+    # create_react_agent 接受 'state_modifier' 或 'messages_modifier' 来注入系统提示词。
     
-    # We create the compiled graph for the agent
+    # 我们为 Agent 创建编译后的图
     agent_runnable = create_react_agent(llm, tools, state_modifier=agent_config.system_prompt)
     
     def agent_node(state):
-        # The agent runnable takes the state and returns a dictionary with updates
-        # We invoke the agent with the current state
+        # Agent runnable 接收状态并返回包含更新的字典
+        # 我们使用当前状态调用 Agent
         result = agent_runnable.invoke(state)
         
-        # Calculate new messages to avoid duplication in the parent graph
-        # because parent graph uses operator.add for messages.
+        # 计算新消息以避免在父图中重复
+        # 因为父图使用 operator.add 来处理消息。
         original_count = len(state["messages"])
         all_messages = result["messages"]
         new_messages = all_messages[original_count:]
@@ -55,31 +55,20 @@ def create_agent_node(agent_config, llm, tools):
 
     return agent_node
 
-# 3. The Supervisor Node
+# 3. Supervisor (控制器) 节点
 def create_supervisor_node(llm, members: List[str]):
     """
-    Creates the supervisor node that decides which agent acts next.
+    创建决定下一个行动 Agent 的 Supervisor 节点。
     """
     
-    # Mock Supervisor Logic
+    # 模拟 Supervisor 逻辑
     if hasattr(llm, "_llm_type") and llm._llm_type == "mock-chat-model":
         def mock_supervisor(state):
-            # Simple round-robin or random logic for demo
-            # Or just call each once then finish.
+            # 演示用的简单轮询或随机逻辑
+            # 或者每个调用一次然后结束。
             messages = state.get("messages", [])
-            last_sender = "user"
-            if messages and isinstance(messages[-1], AIMessage):
-                content = messages[-1].content
-                # Extract sender from content if we formatted it that way, 
-                # but usually we check the name field if set, or just infer.
-                # For this mock, let's just iterate through members.
-                
-            # Find who hasn't run?
-            # Let's just return the first member, then the second...
-            # This is hard to do stateless. 
-            # We'll just randomize or pick the first one that hasn't "spoken" in the last N messages?
             
-            # Simplification: If < 5 messages, pick a random member, else FINISH
+            # 简化：如果消息少于 5 条，随机选择一个成员，否则结束 (FINISH)
             import random
             if len(messages) < 5:
                 return {"next": random.choice(members)}
@@ -87,19 +76,18 @@ def create_supervisor_node(llm, members: List[str]):
         return mock_supervisor
 
     system_prompt = (
-        "You are a supervisor tasked with managing a conversation between the"
-        " following workers: {members}. Given the following user request,"
-        " respond with the worker to act next. Each worker will perform a"
-        " task and respond with their results and status. When finished,"
-        " respond with FINISH."
+        "你是一个主管，负责管理以下工作人员之间的对话：{members}。"
+        "根据用户的请求和当前的对话历史，决定下一个由谁来行动。"
+        "每个工作人员会执行任务并返回结果。"
+        "当任务全部完成时，回复 FINISH。"
     )
     
     options = ["FINISH"] + members
     
-    # Using OpenAI function calling for structured routing
+    # 使用 OpenAI 函数调用进行结构化路由
     function_def = {
         "name": "route",
-        "description": "Select the next role.",
+        "description": "选择下一个角色。",
         "parameters": {
             "title": "routeSchema",
             "type": "object",
@@ -121,7 +109,7 @@ def create_supervisor_node(llm, members: List[str]):
             MessagesPlaceholder(variable_name="messages"),
             (
                 "system",
-                "Given the conversation above, who should act next? Or should we FINISH? Select one of: {options}",
+                "基于以上对话，谁应该下一个行动？或者应该结束(FINISH)？选择: {options}",
             ),
         ]
     ).partial(options=str(options), members=", ".join(members))
@@ -133,16 +121,16 @@ def create_supervisor_node(llm, members: List[str]):
     )
     
     def supervisor_node(state):
-        # Invokes the router logic
+        # 调用路由逻辑
         result = supervisor_chain.invoke(state)
-        return result # returns {"next": "AgentName"} or {"next": "FINISH"}
+        return result # 返回 {"next": "AgentName"} 或 {"next": "FINISH"}
 
     return supervisor_node
 
-# 4. Main Build Function
+# 4. 主构建函数
 def build_dynamic_graph(plan: SystemPlan):
     """
-    Constructs the LangGraph based on the plan.
+    根据计划构建 LangGraph。
     """
     llm = get_llm()
     tools = ALL_TOOLS
@@ -150,20 +138,20 @@ def build_dynamic_graph(plan: SystemPlan):
     members = [agent.name for agent in plan.agents]
     workflow = StateGraph(AgentState)
     
-    # Add Supervisor
+    # 添加 Supervisor
     supervisor_node = create_supervisor_node(llm, members)
     workflow.add_node("supervisor", supervisor_node)
     
-    # Add Worker Agents
+    # 添加 Worker Agents
     for agent_cfg in plan.agents:
         node_func = create_agent_node(agent_cfg, llm, tools)
         workflow.add_node(agent_cfg.name, node_func)
         
-        # Edge: Worker -> Supervisor
-        # After a worker is done, it goes back to supervisor
+        # 边: Worker -> Supervisor
+        # Worker 完成后，回到 Supervisor
         workflow.add_edge(agent_cfg.name, "supervisor")
         
-    # Edges: Supervisor -> Workers (Conditional)
+    # 边: Supervisor -> Workers (条件边)
     conditional_map = {k: k for k in members}
     conditional_map["FINISH"] = END
     
